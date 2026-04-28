@@ -47,13 +47,19 @@ send_email() {
     local subject="$1" body="$2"
     if [ -z "$QQ_EMAIL" ] || [ -z "$QQ_SMTP_AUTH_CODE" ]; then
         echo "  (Skipping email: QQ_EMAIL or QQ_SMTP_AUTH_CODE not configured)"
-        return
+        return 0
     fi
 
-    # Use curl to send via QQ SMTP
-    # Build a minimal email with headers
-    local mail_data
-    mail_data=$(cat << EOF
+    # Verify curl supports SMTP (GitHub Actions curl usually does)
+    if ! curl --version 2>/dev/null | grep -qi "smtp"; then
+        echo "  Email failed: curl was not compiled with SMTP support"
+        return 1
+    fi
+
+    # Write email to temp file (more reliable than here-string + stdin)
+    local mail_file
+    mail_file=$(mktemp)
+    cat > "$mail_file" <<EOF
 From: $QQ_EMAIL
 To: $QQ_EMAIL
 Subject: $subject
@@ -61,16 +67,32 @@ Content-Type: text/plain; charset=utf-8
 
 $body
 EOF
-)
-    # curl-based SMTP via QQ mail
-    curl --ssl-reqd \
+
+    echo "  Sending email via QQ SMTP to $QQ_EMAIL ..."
+
+    local curl_exit=0
+    # -S: show errors (even with -s), --fail-with-body: treat HTTP/SMTP errors as failures
+    curl -sS --ssl-reqd --fail-with-body \
         --url "smtps://smtp.qq.com:465" \
         --user "$QQ_EMAIL:$QQ_SMTP_AUTH_CODE" \
         --mail-from "$QQ_EMAIL" \
         --mail-rcpt "$QQ_EMAIL" \
-        --upload-file - <<< "$mail_data" 2>/dev/null && \
-        echo "  Email sent to $QQ_EMAIL" || \
-        echo "  Failed to send email (curl SMTP may not be available; install mailx or msmtp)"
+        --upload-file "$mail_file" \
+        || curl_exit=$?
+
+    rm -f "$mail_file"
+
+    if [ "$curl_exit" -eq 0 ]; then
+        echo "  Email sent to $QQ_EMAIL"
+        return 0
+    else
+        echo "  Email FAILED (curl exit: $curl_exit)"
+        echo "  Common causes:"
+        echo "    - QQ_SMTP_AUTH_CODE is wrong (it is NOT your QQ password)"
+        echo "    - Generate it at: QQ Mail -> Settings -> Account -> POP3/IMAP/SMTP"
+        echo "    - Network/firewall blocking smtps://smtp.qq.com:465"
+        return 1
+    fi
 }
 
 # --- Load tokens ---
@@ -169,7 +191,7 @@ while true; do
         HAS_SENT_REPORT=true
         echo ""
         echo "=== Sending final report ==="
-        send_email "Anyrouter Keepalive Report ($(date '+%Y-%m-%d'))" "$ALL_RESULTS"
+        send_email "Anyrouter Keepalive Report ($(date '+%Y-%m-%d'))" "$ALL_RESULTS" || true
         echo ""
 
         # Do one more round if time allows, but signal it's the last
@@ -203,7 +225,7 @@ echo "========================================"
 
 # Send one final report if we never sent one (e.g. very short run)
 if [ "$HAS_SENT_REPORT" = false ]; then
-    send_email "Anyrouter Keepalive Report ($(date '+%Y-%m-%d'))" "$ALL_RESULTS"
+    send_email "Anyrouter Keepalive Report ($(date '+%Y-%m-%d'))" "$ALL_RESULTS" || true
 fi
 
 echo "Done."
