@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # keepalive.sh - Health-check a single Anyrouter token using Claude CLI
 # Usage: keepalive.sh <token> [base_url] [model]
+# Prints ALL output (including errors, retries, stack traces) for diagnostics.
 set -euo pipefail
 
 TOKEN="${1:?Usage: $0 <token> [base_url] [model]}"
@@ -46,23 +47,49 @@ EOF
 mv "$TMP_FILE" "$SETTINGS_FILE"
 
 # --- Run health check ---
-# In CI (GitHub Actions), bypass permissions since there's no interactive user.
-# Locally with a terminal, the user can approve interactively.
 EXTRA_FLAGS=()
 if [ "${CI:-}" = "true" ]; then
     EXTRA_FLAGS+=(--dangerously-skip-permissions)
 fi
 
-OUTPUT=$(claude -p "$PROMPT" --print --model "$MODEL" --bare "${EXTRA_FLAGS[@]}" 2>&1) || true
+# Run claude with timeout to prevent infinite retry hangs.
+# Capture both stdout and stderr into a temp file, plus record exit code.
+OUTPUT_FILE=$(mktemp)
+EXIT_CODE=0
 
-# --- Clean up ---
-rm -f "$SETTINGS_FILE"
+# 120s timeout: if claude enters infinite retry, kill it
+timeout 120 claude -p "$PROMPT" --print --model "$MODEL" --bare "${EXTRA_FLAGS[@]}" > "$OUTPUT_FILE" 2>&1 || EXIT_CODE=$?
+
+# --- Print ALL output for diagnostics ---
+echo "  Prompt: ${PROMPT:0:60}..."
+echo "  --- Claude output (exit_code=$EXIT_CODE) ---"
+cat "$OUTPUT_FILE" | sed 's/^/    /'
+echo "  --- End output ---"
 
 # --- Evaluate result ---
-if [ -n "$OUTPUT" ]; then
-    echo "SUCCESS"
-    exit 0
-else
-    echo "FAILED (empty response)"
+OUTPUT_CONTENT=$(cat "$OUTPUT_FILE" 2>/dev/null || true)
+
+# Clean up
+rm -f "$OUTPUT_FILE" "$SETTINGS_FILE"
+
+# 1. Non-zero exit code is a clear failure (includes timeout exit 124)
+if [ "$EXIT_CODE" -ne 0 ]; then
+    echo "  FAILED (non-zero exit: $EXIT_CODE)"
     exit 1
 fi
+
+# 2. Empty response is a failure
+if [ -z "$OUTPUT_CONTENT" ]; then
+    echo "  FAILED (empty response)"
+    exit 1
+fi
+
+# 3. Check for common API error indicators that might appear even with exit 0
+ERROR_PATTERNS="rate limit|authentication failed|unauthorized|invalid api key|connection refused|timeout|429|401|403|500|service unavailable|retry after|too many requests"
+if echo "$OUTPUT_CONTENT" | grep -qiE "$ERROR_PATTERNS"; then
+    echo "  FAILED (API error detected in output)"
+    exit 1
+fi
+
+echo "  SUCCESS"
+exit 0

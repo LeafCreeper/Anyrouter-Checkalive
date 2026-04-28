@@ -123,10 +123,12 @@ while true; do
         echo "[$((i+1))/${#TOKENS[@]}] Testing $token_preview ..."
 
         if result=$(bash "$SCRIPT_DIR/keepalive.sh" "$token" "$BASE_URL" "$MODEL" 2>&1); then
+            echo "$result"
             echo "  ✓ $token_preview is active"
             ROUND_RESULTS+="  ✓ $token_preview is active"$'\n'
             ROUND_SUCCESS=$((ROUND_SUCCESS + 1))
         else
+            echo "$result"
             echo "  ✗ $token_preview failed"
             ROUND_RESULTS+="  ✗ $token_preview failed"$'\n'
             ROUND_FAIL=$((ROUND_FAIL + 1))
