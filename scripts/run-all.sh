@@ -2,9 +2,16 @@
 # run-all.sh - Batch health-check runner with internal 50-minute loop
 # Designed for a single GitHub Actions container: runs rounds until ~5h58m time limit.
 # Supports local usage via .env file or ANYROUTER_TOKENS env var.
+# Usage: run-all.sh [--once]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# --- Parse args ---
+ONCE=false
+if [ "${1:-}" = "--once" ]; then
+    ONCE=true
+fi
 
 # --- Configuration ---
 BASE_URL="${BASE_URL:-https://anyrouter.top/v1}"
@@ -143,6 +150,13 @@ while true; do
     echo "--- Round $ROUND summary: $ROUND_SUCCESS success, $ROUND_FAIL failed ---"
 
     ROUND=$((ROUND + 1))
+
+    # If --once mode, exit after the first round
+    if [ "$ONCE" = true ]; then
+        echo ""
+        echo "=== --once mode: single round complete. Exiting. ==="
+        break
+    fi
 
     # Check if we should send final report (last round before time limit)
     NOW=$(date +%s)
