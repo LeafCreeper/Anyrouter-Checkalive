@@ -1,0 +1,47 @@
+name: Anyrouter Keepalive
+
+on:
+  schedule:
+    # UTC 18:00 = UTC+8 02:00 daily
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'API Base URL'
+        required: false
+        default: 'https://anyrouter.top/v1'
+      model:
+        description: 'Claude model for health checks'
+        required: false
+        default: 'haiku'
+
+# Prevent concurrent runs stacking up
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6h max, our script self-terminates at ~5h58m
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Claude Code CLI
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Claude CLI
+        run: claude --version
+
+      - name: Run keepalive for all tokens
+        env:
+          ANYROUTER_TOKENS: ${{ secrets.ANYROUTER_TOKENS }}
+          BASE_URL: ${{ github.event.inputs.base_url || 'https://anyrouter.top/v1' }}
+          MODEL: ${{ github.event.inputs.model || 'haiku' }}
+          QQ_EMAIL: ${{ secrets.QQ_EMAIL }}
+          QQ_SMTP_AUTH_CODE: ${{ secrets.QQ_SMTP_AUTH_CODE }}
+          CI: "true"
+        run: bash scripts/run-all.sh

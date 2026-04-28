@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(claude --version)",
+      "Bash(claude -p \"Review this one-line Python script for bugs: print\\('hello keepalive'\\)\" --print --model haiku)",
+      "Bash(claude install *)",
+      "WebSearch",
+      "WebFetch(domain:docs.anthropic.com)",
+      "Bash(chmod +x *)",
+      "Bash(bash tests/test_keepalive.bats)",
+      "Bash(npm list *)",
+      "Bash(npm install *)",
+      "Bash(bats *)",
+      "Bash(export ANYROUTER_TOKENS=\"\")",
+      "Bash(timeout 5 bash -c 'source scripts/run-all.sh 2>&1')",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(task_stop bmak5rwve *)",
+      "Bash(echo \"BATS_EXIT: $?\")",
+      "Bash(timeout 5 bash scripts/run-all.sh)",
+      "Bash(echo \"EXIT=$?\")"
+    ]
+  }
+}
