@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# monitor-recovery.sh - Poll all tokens every 30min, detect recovery, alert immediately
+# monitor-recovery.sh - Poll all tokens every 30min, send round summary, early-exit when fast
 # Designed for manual-trigger GitHub Actions workflow (6h container).
 # Reuses keepalive.sh for health checks.
 # Usage: monitor-recovery.sh
@@ -14,6 +14,11 @@ POLL_INTERVAL="${POLL_INTERVAL:-1800}"          # 30 minutes between rounds
 MAX_DURATION_SEC="${MAX_DURATION_SEC:-21500}"   # ~5h58m (just under 6h)
 QQ_EMAIL="${QQ_EMAIL:-}"
 QQ_SMTP_AUTH_CODE="${QQ_SMTP_AUTH_CODE:-}"
+
+# Beijing time helper
+beijing_ts() {
+    TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S CST'
+}
 
 # --- Load tokens (reused from run-all.sh) ---
 load_tokens() {
@@ -54,7 +59,7 @@ Content-Type: text/plain; charset=utf-8
 
 $body
 EOF
-    echo "  Sending alert email via QQ SMTP to $QQ_EMAIL ..."
+    echo "  Sending email via QQ SMTP to $QQ_EMAIL ..."
     local curl_exit=0
     curl -sS --ssl-reqd --fail-with-body \
         --url "smtps://smtp.qq.com:465" \
@@ -66,10 +71,10 @@ EOF
         || curl_exit=$?
     rm -f "$mail_file"
     if [ "$curl_exit" -eq 0 ]; then
-        echo "  Alert email sent to $QQ_EMAIL"
+        echo "  Email sent to $QQ_EMAIL"
         return 0
     else
-        echo "  Alert email FAILED (curl exit: $curl_exit)"
+        echo "  Email FAILED (curl exit: $curl_exit)"
         return 1
     fi
 }
@@ -87,13 +92,10 @@ echo "Model: $MODEL"
 echo "Poll interval: ${POLL_INTERVAL}s"
 echo ""
 
-# Track each token's previous state. Values: "success" or "failed"
-# On first round the token has no previous state (empty) — no alert sent.
-declare -A PREV_STATES
+declare -A PREV_STATES   # "success" or "failed"
 
 START_TIME=$(date +%s)
 ROUND=1
-ALERTS_SENT=0
 
 while true; do
     NOW=$(date +%s)
@@ -106,14 +108,19 @@ while true; do
     fi
 
     echo "============================================="
-    echo " Round $ROUND  |  $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    echo " Round $ROUND  |  $(beijing_ts)"
     echo " Elapsed: ${ELAPSED}s  |  Remaining: ~${REMAINING}s"
     echo "============================================="
+
+    # Per-round tracking
+    TOKEN_RESULTS=()
+    TOKEN_TIMES=()       # response time (seconds), 0 for failed
+    ALL_SUCCESS=true
+    MAX_TIME=0
 
     for i in "${!TOKENS[@]}"; do
         token="${TOKENS[$i]}"
         token_preview="${token:0:5}..."
-        prev_state="${PREV_STATES[$token]:-}"
 
         # Check remaining time before each token
         NOW=$(date +%s)
@@ -124,7 +131,6 @@ while true; do
 
         echo "[$((i+1))/${#TOKENS[@]}] Testing $token_preview ..."
 
-        # Measure wall-clock time of the health check
         CHECK_START=$(date +%s)
         if result=$(bash "$SCRIPT_DIR/keepalive.sh" "$token" "$BASE_URL" "$MODEL" 2>&1); then
             CHECK_END=$(date +%s)
@@ -132,32 +138,17 @@ while true; do
             echo "$result"
             echo "  ✓ $token_preview active (${response_time}s)"
 
+            TOKEN_RESULTS+=("✓ $token_preview (${response_time}s)")
+            TOKEN_TIMES+=("$response_time")
             PREV_STATES[$token]="success"
-
-            # Recovery detected: was not in success state, now succeeds
-            if [ "$prev_state" != "success" ]; then
-                ALERTS_SENT=$((ALERTS_SENT + 1))
-                echo ""
-                echo "  ########################################"
-                echo "  #  RECOVERY DETECTED: $token_preview"
-                echo "  #  Response time: ${response_time}s"
-                echo "  ########################################"
-                echo ""
-
-                send_email \
-                    "ANYROUTER 已恢复 - 现在可以用了！" \
-                    "Token: $token_preview
-状态: ✅ 已恢复 (从不可用变为可用)
-响应时间: ${response_time} 秒
-检测时间: $(date '+%Y-%m-%d %H:%M:%S %Z')
-轮次: 第 ${ROUND} 轮
-
-Anyrouter 已恢复工作，请确认使用。"
-            fi
+            [ "$response_time" -gt "$MAX_TIME" ] && MAX_TIME=$response_time
         else
             echo "$result"
             echo "  ✗ $token_preview failed"
+            TOKEN_RESULTS+=("✗ $token_preview failed")
+            TOKEN_TIMES+=("0")
             PREV_STATES[$token]="failed"
+            ALL_SUCCESS=false
         fi
 
         # Brief pause between tokens
@@ -169,9 +160,73 @@ Anyrouter 已恢复工作，请确认使用。"
         fi
     done
 
+    # --- End of round: build summary ---
+    ROUND_SUMMARY=""
+    SUCCESS_COUNT=0
+    FAIL_COUNT=0
+
+    for i in "${!TOKENS[@]}"; do
+        ROUND_SUMMARY+="  ${TOKEN_RESULTS[$i]}"$'\n'
+        if [ "${PREV_STATES[${TOKENS[$i]}]}" = "success" ]; then
+            SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+        else
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        fi
+    done
+
+    ROUND_SUMMARY+=$'\n'"Summary: $SUCCESS_COUNT success, $FAIL_COUNT failed"
+
+    echo ""
+    echo "--- Round $ROUND summary: $SUCCESS_COUNT success, $FAIL_COUNT failed ---"
+    echo ""
+
+    # --- Decide action ---
+    if [ "$ALL_SUCCESS" = true ] && [ "$MAX_TIME" -lt 30 ]; then
+        # All healthy and fast — early exit
+        echo ">>> All tokens healthy (max response ${MAX_TIME}s < 30s). Sending '快用' email and exiting."
+        send_email \
+            "快用！现在状态超好，不接着测了" \
+            "Anyrouter 已全面恢复，响应极快，建议立即使用！
+
+$(beijing_ts)
+
+各 token 状态：
+$ROUND_SUMMARY
+
+最大响应时间: ${MAX_TIME}s
+所有 token 均正常工作且响应时间 < 30 秒，状态超好！检测到此结束。"
+        echo ""
+        echo "=== Early exit: all healthy and fast. ==="
+        break
+    fi
+
+    # Send normal round summary
+    if [ "$ALL_SUCCESS" = true ]; then
+        send_email \
+            "Anyrouter 监控报告 - 第${ROUND}轮（全部可用）" \
+            "轮次: 第 ${ROUND} 轮
+检测时间: $(beijing_ts)
+
+各 token 状态：
+$ROUND_SUMMARY
+
+最大响应时间: ${MAX_TIME}s
+全部可用，但响应时间未达到 30 秒以内的超优标准，继续监控。"
+    else
+        send_email \
+            "Anyrouter 监控报告 - 第${ROUND}轮（${FAIL_COUNT}个不可用）" \
+            "轮次: 第 ${ROUND} 轮
+检测时间: $(beijing_ts)
+
+各 token 状态：
+$ROUND_SUMMARY
+
+仍有 ${FAIL_COUNT} 个 token 不可用，继续监控。"
+    fi
+
     ROUND=$((ROUND + 1))
 
-    # Sleep until next poll (respecting time limit)
+    # --- Sleep until next poll ---
     NOW=$(date +%s)
     ELAPSED=$((NOW - START_TIME))
     REMAINING=$((MAX_DURATION_SEC - ELAPSED))
@@ -192,6 +247,5 @@ done
 echo ""
 echo "========================================"
 echo " Monitor completed."
-echo " Total rounds: $((ROUND - 1))"
-echo " Recovery alerts sent: $ALERTS_SENT"
+echo " Total rounds: $ROUND"
 echo "========================================"
